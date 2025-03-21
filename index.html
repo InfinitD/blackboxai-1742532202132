@@ -1,0 +1,481 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>DashCam Navigation MVP</title>
+    <link href="https://fonts.googleapis.com/css2?family=Roboto+Mono:wght@400;700&display=swap" rel="stylesheet">
+    <style>
+        body {
+            margin: 0;
+            padding: 0;
+            height: 100vh;
+            background: black;
+            font-family: 'Roboto Mono', monospace;
+            overflow: hidden;
+        }
+        #videoElement {
+            width: 100%;
+            height: 100vh;
+            object-fit: cover;
+        }
+        #canvasOutput {
+            position: absolute;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100vh;
+            pointer-events: none;
+        }
+        .capture-btn {
+            position: fixed;
+            bottom: 30px;
+            left: 50%;
+            transform: translateX(-50%);
+            width: 70px;
+            height: 70px;
+            border-radius: 50%;
+            background: rgba(255, 255, 255, 0.3);
+            border: 3px solid #fff;
+            cursor: pointer;
+            z-index: 100;
+        }
+        .capture-btn::after {
+            content: '';
+            position: absolute;
+            top: 5px;
+            right: 5px;
+            width: 10px;
+            height: 10px;
+            border-radius: 50%;
+            background: #ff4444;
+            animation: pulse 1s infinite;
+        }
+        @keyframes pulse {
+            0% { opacity: 1; }
+            50% { opacity: 0.5; }
+            100% { opacity: 1; }
+        }
+        .status {
+            position: fixed;
+            top: 20px;
+            left: 50%;
+            transform: translateX(-50%);
+            padding: 10px 20px;
+            border-radius: 5px;
+            color: white;
+            z-index: 1000;
+            background: rgba(0, 0, 0, 0.8);
+            opacity: 0;
+            transition: opacity 0.3s;
+        }
+        .status.show { opacity: 1; }
+        .error { background: #ff4444 !important; }
+        .success { background: #44ff44 !important; }
+        .warning { background: #ffaa00 !important; }
+        
+        .hud {
+            position: fixed;
+            top: 20px;
+            right: 20px;
+            color: white;
+            text-align: right;
+            text-shadow: 2px 2px 2px rgba(0,0,0,0.5);
+        }
+        .speed {
+            font-size: 36px;
+            font-weight: 700;
+            margin-bottom: 5px;
+        }
+        .speed-unit {
+            font-size: 14px;
+            opacity: 0.8;
+        }
+        .info-row {
+            font-size: 14px;
+            margin-bottom: 5px;
+            opacity: 0.8;
+        }
+        
+        .warning-indicator {
+            position: fixed;
+            top: 50%;
+            left: 50%;
+            transform: translate(-50%, -50%);
+            color: #ffaa00;
+            font-size: 24px;
+            text-align: center;
+            opacity: 0;
+            transition: opacity 0.3s;
+            text-shadow: 0 0 10px rgba(255, 170, 0, 0.5);
+        }
+        .warning-indicator.show { opacity: 1; }
+        
+        .weather-indicator {
+            position: fixed;
+            top: 20px;
+            left: 20px;
+            color: white;
+            font-family: 'Roboto Mono', monospace;
+            text-shadow: 2px 2px 2px rgba(0,0,0,0.5);
+        }
+
+        .rain-drop {
+            position: absolute;
+            background: linear-gradient(transparent, rgba(255,255,255,0.7));
+            pointer-events: none;
+            transform-origin: center top;
+        }
+
+        .headlight-glow {
+            position: fixed;
+            bottom: 0;
+            left: 50%;
+            transform: translateX(-50%);
+            width: 800px;
+            height: 400px;
+            background: radial-gradient(
+                ellipse at center,
+                rgba(255, 255, 200, 0.2) 0%,
+                rgba(255, 255, 200, 0.1) 50%,
+                transparent 70%
+            );
+            pointer-events: none;
+            opacity: 0;
+            transition: opacity 1s;
+        }
+    </style>
+</head>
+<body>
+    <canvas id="videoElement"></canvas>
+    <canvas id="canvasOutput"></canvas>
+    <div id="headlightGlow" class="headlight-glow"></div>
+    
+    <button class="capture-btn" id="captureBtn">
+        <div style="width:100%;height:100%;border-radius:50%;background:rgba(255,0,0,0.8)"></div>
+    </button>
+    
+    <div class="hud">
+        <div class="speed">
+            <span id="speedValue">60</span>
+            <span class="speed-unit">km/h</span>
+        </div>
+        <div class="info-row">Recording: <span id="recordingTime">2:00</span></div>
+        <div class="info-row">Lane Detection: <span id="laneStatus">Active</span></div>
+        <div class="info-row">Light: <span id="lightCondition">Day</span></div>
+    </div>
+    
+    <div class="warning-indicator" id="warningIndicator">
+        SHARP TURN AHEAD
+    </div>
+    
+    <div class="weather-indicator">
+        Weather: <span id="weatherStatus">Clear</span>
+    </div>
+
+    <script>
+        // Wait for DOM to be fully loaded
+        document.addEventListener('DOMContentLoaded', function() {
+            const videoWidth = window.innerWidth;
+            const videoHeight = window.innerHeight;
+            let frameCount = 0;
+            let curveOffset = 0;
+            let speed = 60;
+            let dayNightCycle = 0;
+            let isRaining = false;
+            let raindrops = [];
+
+            class TrafficCar {
+                constructor() {
+                    this.reset();
+                }
+
+                reset() {
+                    this.distance = Math.random() * 0.5 + 0.5;
+                    this.lane = Math.random() > 0.5 ? 1 : -1;
+                    this.speed = Math.random() * 20 + 50;
+                }
+
+                update() {
+                    this.distance -= (speed - this.speed) * 0.0001;
+                    if (this.distance < 0.1) this.reset();
+                }
+
+                draw(ctx) {
+                    const xOffset = Math.sin(curveOffset/100) * 150 * this.distance;
+                    const y = videoHeight - videoHeight * this.distance;
+                    const width = 50 * this.distance;
+                    const height = 30 * this.distance;
+                    const x = videoWidth/2 + (xOffset + this.lane * 80 * this.distance);
+
+                    ctx.fillStyle = '#666';
+                    ctx.fillRect(x - width/2, y - height, width, height);
+
+                    ctx.fillStyle = '#ff0000';
+                    ctx.fillRect(x - width/3, y - height/3, width/6, height/6);
+                    ctx.fillRect(x + width/6, y - height/3, width/6, height/6);
+                }
+            }
+
+            class Raindrop {
+                constructor() {
+                    this.reset();
+                }
+
+                reset() {
+                    this.x = Math.random() * videoWidth;
+                    this.y = -10;
+                    this.speed = Math.random() * 10 + 10;
+                    this.length = Math.random() * 20 + 10;
+                    this.element = document.createElement('div');
+                    this.element.className = 'rain-drop';
+                    this.element.style.left = this.x + 'px';
+                    this.element.style.width = '2px';
+                    this.element.style.height = this.length + 'px';
+                    document.body.appendChild(this.element);
+                }
+
+                update() {
+                    this.y += this.speed;
+                    this.x -= speed * 0.05;
+                    this.element.style.transform = `translate(${this.x}px, ${this.y}px) rotate(15deg)`;
+                    
+                    if (this.y > videoHeight) {
+                        this.element.remove();
+                        this.reset();
+                    }
+                }
+            }
+
+            function showStatus(message, type = '') {
+                const status = document.createElement('div');
+                status.textContent = message;
+                status.className = `status ${type}`;
+                document.body.appendChild(status);
+                status.offsetHeight;
+                status.classList.add('show');
+                setTimeout(() => {
+                    status.classList.remove('show');
+                    setTimeout(() => status.remove(), 300);
+                }, 3000);
+            }
+
+            function updateWeather() {
+                if (Math.random() < 0.001) {
+                    isRaining = !isRaining;
+                    document.getElementById('weatherStatus').textContent = isRaining ? 'Rain' : 'Clear';
+                    
+                    if (isRaining) {
+                        showStatus('Rain detected', 'info');
+                        for (let i = 0; i < 100; i++) {
+                            raindrops.push(new Raindrop());
+                        }
+                    } else {
+                        showStatus('Weather clearing', 'info');
+                        raindrops.forEach(drop => drop.element.remove());
+                        raindrops = [];
+                    }
+                }
+            }
+
+            function updateRain() {
+                if (isRaining) {
+                    raindrops.forEach(drop => drop.update());
+                }
+            }
+
+            let recordedFrames = [];
+            const BUFFER_DURATION = 120;
+            let isRecording = true;
+            const trafficCars = [new TrafficCar(), new TrafficCar(), new TrafficCar()];
+
+            function drawMockFrame(ctx) {
+                dayNightCycle += 0.001;
+                const brightness = (Math.sin(dayNightCycle) + 1) / 2;
+                const isDark = brightness < 0.3;
+                document.getElementById('lightCondition').textContent = isDark ? 'Night' : 'Day';
+                document.getElementById('headlightGlow').style.opacity = isDark ? '1' : '0';
+
+                ctx.fillStyle = isDark ? '#111' : '#1a1a1a';
+                ctx.fillRect(0, 0, videoWidth, videoHeight);
+
+                const gradient = ctx.createLinearGradient(0, 0, 0, videoHeight/2);
+                if (isDark) {
+                    gradient.addColorStop(0, '#000033');
+                    gradient.addColorStop(1, '#111');
+                } else {
+                    gradient.addColorStop(0, '#001f3f');
+                    gradient.addColorStop(1, '#333');
+                }
+                ctx.fillStyle = gradient;
+                ctx.fillRect(0, 0, videoWidth, videoHeight/2);
+
+                const roadCurve = Math.sin(curveOffset/100) * 200;
+                ctx.beginPath();
+                ctx.moveTo(0, videoHeight);
+                ctx.lineTo(videoWidth, videoHeight);
+                ctx.lineTo(videoWidth/2 + roadCurve, videoHeight/2);
+                ctx.lineTo(videoWidth/2 + roadCurve * 0.5, videoHeight/2);
+                ctx.fillStyle = isDark ? '#222' : '#444';
+                ctx.fill();
+
+                for(let i = 0; i < 10; i++) {
+                    const y = videoHeight - i * 50;
+                    const xOffset = Math.sin((curveOffset + i * 20)/100) * (100 - i * 5);
+                    
+                    ctx.beginPath();
+                    ctx.setLineDash([20, 20]);
+                    ctx.moveTo(videoWidth/2 + xOffset, y);
+                    ctx.lineTo(videoWidth/2 + xOffset * 0.8, y - 40);
+                    ctx.strokeStyle = isDark ? '#ffff00' : '#fff';
+                    ctx.lineWidth = 5;
+                    ctx.stroke();
+                    
+                    ctx.beginPath();
+                    ctx.setLineDash([]);
+                    ctx.moveTo(videoWidth/2 + xOffset - 100, y);
+                    ctx.lineTo(videoWidth/2 + xOffset * 0.8 - 80, y - 40);
+                    ctx.moveTo(videoWidth/2 + xOffset + 100, y);
+                    ctx.lineTo(videoWidth/2 + xOffset * 0.8 + 80, y - 40);
+                    ctx.stroke();
+                }
+
+                trafficCars.forEach(car => {
+                    car.update();
+                    car.draw(ctx);
+                });
+
+                if (isRaining) {
+                    ctx.fillStyle = 'rgba(0, 0, 0, 0.2)';
+                    ctx.fillRect(0, 0, videoWidth, videoHeight);
+                }
+
+                curveOffset += speed/20;
+                if(frameCount % 60 === 0) {
+                    speed += (Math.random() - 0.5) * 2;
+                    speed = Math.max(40, Math.min(80, speed));
+                    document.getElementById('speedValue').textContent = Math.round(speed);
+                }
+
+                const turnWarning = document.getElementById('warningIndicator');
+                if (Math.abs(roadCurve) > 150) {
+                    turnWarning.classList.add('show');
+                } else {
+                    turnWarning.classList.remove('show');
+                }
+
+                frameCount++;
+                updateWeather();
+                updateRain();
+            }
+
+            function processVideo() {
+                const videoCanvas = document.getElementById('videoElement');
+                const outputCanvas = document.getElementById('canvasOutput');
+                const ctx = outputCanvas.getContext('2d');
+                
+                outputCanvas.width = videoWidth;
+                outputCanvas.height = videoHeight;
+
+                setInterval(() => {
+                    if (!isRecording) return;
+                    
+                    recordedFrames.push({
+                        imageData: videoCanvas.toDataURL('image/jpeg', 0.5),
+                        timestamp: Date.now(),
+                        speed: speed,
+                        curve: Math.sin(curveOffset/100)
+                    });
+                    
+                    while (recordedFrames.length > 0 && 
+                           (Date.now() - recordedFrames[0].timestamp) > BUFFER_DURATION * 1000) {
+                        recordedFrames.shift();
+                    }
+                    
+                    ctx.clearRect(0, 0, outputCanvas.width, outputCanvas.height);
+                    
+                    const xOffset = Math.sin(curveOffset/100) * 150;
+                    ctx.beginPath();
+                    ctx.moveTo(videoWidth/2 - 100, videoHeight);
+                    ctx.quadraticCurveTo(
+                        videoWidth/2 - 50 + xOffset * 0.5, 
+                        videoHeight/2,
+                        videoWidth/2 + xOffset, 
+                        videoHeight/3
+                    );
+                    ctx.moveTo(videoWidth/2 + 100, videoHeight);
+                    ctx.quadraticCurveTo(
+                        videoWidth/2 + 50 + xOffset * 0.5, 
+                        videoHeight/2,
+                        videoWidth/2 + xOffset + 100, 
+                        videoHeight/3
+                    );
+                    
+                    const gradient = ctx.createLinearGradient(0, videoHeight, 0, videoHeight/3);
+                    gradient.addColorStop(0, 'rgba(0, 123, 255, 0.8)');
+                    gradient.addColorStop(1, 'rgba(0, 123, 255, 0.2)');
+                    ctx.strokeStyle = gradient;
+                    ctx.lineWidth = 8;
+                    ctx.stroke();
+                    
+                    const minutes = Math.floor(BUFFER_DURATION / 60);
+                    const seconds = BUFFER_DURATION % 60;
+                    document.getElementById('recordingTime').textContent = 
+                        `${minutes}:${seconds.toString().padStart(2, '0')}`;
+                }, 1000/30);
+            }
+
+            async function captureBuffer() {
+                if (recordedFrames.length === 0) {
+                    showStatus('No frames available', 'error');
+                    return;
+                }
+
+                showStatus('Saving capture...');
+                
+                const data = {
+                    frames: recordedFrames.length,
+                    timestamp: new Date().toISOString(),
+                    speed: speed,
+                    preview: recordedFrames[recordedFrames.length - 1].imageData,
+                    telemetry: {
+                        averageSpeed: recordedFrames.reduce((acc, frame) => acc + frame.speed, 0) / recordedFrames.length,
+                        maxCurve: Math.max(...recordedFrames.map(frame => Math.abs(frame.curve))),
+                        weather: isRaining ? 'Rain' : 'Clear',
+                        lightCondition: document.getElementById('lightCondition').textContent
+                    }
+                };
+                
+                const blob = new Blob([JSON.stringify(data)], { type: 'application/json' });
+                const url = URL.createObjectURL(blob);
+                const a = document.createElement('a');
+                a.href = url;
+                a.download = `incident_${new Date().toISOString()}.json`;
+                a.click();
+                
+                URL.revokeObjectURL(url);
+                showStatus('Capture saved successfully', 'success');
+            }
+
+            function initMockVideo() {
+                const videoCanvas = document.getElementById('videoElement');
+                const ctx = videoCanvas.getContext('2d');
+                
+                videoCanvas.width = videoWidth;
+                videoCanvas.height = videoHeight;
+                
+                setInterval(() => {
+                    drawMockFrame(ctx);
+                }, 1000/30);
+                
+                showStatus('System initialized', 'success');
+                processVideo();
+            }
+
+            // Initialize everything
+            document.getElementById('captureBtn').onclick = captureBuffer;
+            initMockVideo();
+        });
+    </script>
+</body>
+</html>
